@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+uv.lock
+
+# data
+data/*
+!data/.gitkeep
+!data/imageCAS_ablation/.gitkeep
+*.nii.gz
+*.nii
+*.gz
+*.npy
+*.nrrd
+
+#weights
+*.pth
+*.pt
+*.pkl
+*.pickle
+*.ckpt
+
+#result
+result/*
+!result/.gitkeep
+
+#text
+*.txt
+!requirements.txt
+*.log
+*.csv
+!data/imageCAS/imageCAS_data_split.csv
+*.json
+*.yaml
+!data/imageCAS_ablation/data_splits.yaml
+*.yml.dvc/tmp/
