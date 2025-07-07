@@ -27,7 +27,7 @@ from pathlib import Path
 import csv
 from dvclive.lightning import DVCLiveLogger
 
-from src.data.ablation1_dataloader_2 import CoronaryArteryDataModule
+from src.data.ablation1_dataloader import CoronaryArteryDataModule
 from src.models.proposed_networks import NetworkFactory
 from src.losses.losses import LossFactory
 from src.metrics.metrics import MetricFactory
