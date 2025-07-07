@@ -20,6 +20,7 @@ import SimpleITK as sitk
 import torch
 import lightning.pytorch as pl
 from pathlib import Path
+import functools
 
 # 7 experiments
 EXPERIMENT_CONFIGS = {
@@ -81,6 +82,7 @@ EXPERIMENT_CONFIGS = {
     },
 }
 
+
 def clip_normalize_distance_map(data, clip_min=None, clip_max=None, normalize=False, norm_min=-1, norm_max=1):
     """
     clip and normalize distance map
@@ -91,13 +93,30 @@ def clip_normalize_distance_map(data, clip_min=None, clip_max=None, normalize=Fa
     distance_maps = []
     
     for c in range(dist.shape[0]):  # each channel
-        channel_dist = dist[c]  # [H, W, D]
+
+        channel_mask = dist[c].numpy()  # [H, W, D]
+        
+        # convert to SimpleITK image
+        sitk_mask = sitk.GetImageFromArray(channel_mask)
+        sitk_mask = sitk.Cast(sitk_mask, sitk.sitkUInt8)
+        
+        # create distance map
+        distance_map = sitk.SignedMaurerDistanceMap(
+            sitk_mask,
+            insideIsPositive=False,  # heart outside is positive
+            squaredDistance=False,
+            useImageSpacing=True     # physical distance (mm)
+        )
+        
+        # convert to tensor
+        distance_map_array = sitk.GetArrayFromImage(distance_map)
+        distance_map_tensor = torch.from_numpy(distance_map_array)
         
         # clipping if clip_min and clip_max are provided
         if clip_min is not None and clip_max is not None:
-            clipped_dist = torch.clamp(channel_dist, min=clip_min, max=clip_max)
+            clipped_dist = torch.clamp(distance_map_tensor, min=clip_min, max=clip_max)
         else:
-            clipped_dist = channel_dist
+            clipped_dist = distance_map_tensor
         
         # normalize if normalize=True
         if normalize:
@@ -121,6 +140,24 @@ def clip_normalize_distance_map(data, clip_min=None, clip_max=None, normalize=Fa
     
     data["seg"] = processed_dist
     return data
+
+def clip_normalize_distance_map_with_config(data, experiment_id):
+    """
+    clip and normalize distance map with experiment config
+    """
+    if experiment_id not in EXPERIMENT_CONFIGS:
+        raise ValueError(f"Invalid experiment_id: {experiment_id}. Must be 1-7.")
+    
+    exp_config = EXPERIMENT_CONFIGS[experiment_id]
+    
+    return clip_normalize_distance_map(
+        data,
+        clip_min=exp_config["clip_min"],
+        clip_max=exp_config["clip_max"],
+        normalize=exp_config["normalize"],
+        norm_min=exp_config["norm_min"],
+        norm_max=exp_config["norm_max"]
+    )
 
 class CoronaryArteryDataModule(pl.LightningDataModule):
     def __init__(
@@ -149,16 +186,21 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         
         self.exp_config = EXPERIMENT_CONFIGS[experiment_id]
         
-    def process_distance_map(self, data):
+    def get_distance_map_processor(self):
+        """Create a picklable function for distance map processing"""
+        exp_config = self.exp_config
         
-        return clip_normalize_distance_map(
-            data,
-            clip_min=self.exp_config["clip_min"],
-            clip_max=self.exp_config["clip_max"],
-            normalize=self.exp_config["normalize"],
-            norm_min=self.exp_config["norm_min"],
-            norm_max=self.exp_config["norm_max"]
-        )
+        def process_distance_map(data):
+            return clip_normalize_distance_map(
+                data,
+                clip_min=exp_config["clip_min"],
+                clip_max=exp_config["clip_max"],
+                normalize=exp_config["normalize"],
+                norm_min=exp_config["norm_min"],
+                norm_max=exp_config["norm_max"]
+            )
+        
+        return process_distance_map
         
     def load_data_splits(self, split: str):
         split_dir = self.data_dir / split
@@ -170,7 +212,7 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
 
             image_file = str(case_dir / "img.nii.gz")
             label_file = str(case_dir / "label.nii.gz")
-            seg_file = str(case_dir / "distance_map.nii.gz")  # roi segmentation
+            seg_file = str(case_dir / "heart_combined.nii.gz")  # roi segmentation
             
             if os.path.exists(image_file) and os.path.exists(label_file):
                 data_files.append({
@@ -182,6 +224,12 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         return data_files
 
     def prepare_data(self):
+        # Use functools.partial to create a picklable function
+        distance_map_processor = functools.partial(
+            clip_normalize_distance_map_with_config,
+            experiment_id=self.experiment_id
+        )
+        
         transforms = [
             LoadImaged(keys=["image", "label", "seg"]),
             EnsureChannelFirstd(keys=["image", "label", "seg"]),
@@ -194,8 +242,12 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
                 b_max=1.0,
                 clip=True,
             ),
+            AsDiscreted(
+                keys=["seg"],
+                to_onehot=8,
+            ),
             CropForegroundd(keys=["image", "label", "seg"], source_key="image"),
-            Lambda(self.process_distance_map),
+            Lambda(distance_map_processor),
             RandCropByPosNegLabeld(
                 keys=["image", "label", "seg"],
                 label_key="label",
@@ -233,8 +285,12 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
                 b_max=1.0,
                 clip=True,
             ),
+            AsDiscreted(
+                keys=["seg"],
+                to_onehot=8,
+            ),
             CropForegroundd(keys=["image", "label", "seg"], source_key="image"),
-            Lambda(self.process_distance_map),
+            Lambda(distance_map_processor)
         ]
 
         self.val_transforms = Compose(val_transforms)
@@ -274,16 +330,6 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             copy_cache=False
         )
-
-        # self.val_ds = Dataset(
-        #     data=val_files,
-        #     transform=self.val_transforms,
-        # )
-
-        # self.test_ds = Dataset(
-        #     data=test_files,
-        #     transform=self.val_transforms,
-        # )
 
     def train_dataloader(self):
         return DataLoader(
