@@ -27,7 +27,7 @@ from pathlib import Path
 import csv
 from dvclive.lightning import DVCLiveLogger
 
-from src.data.ablation1_dataloader import CoronaryArteryDataModule
+from src.data.ablation1_dataloader_2 import CoronaryArteryDataModule
 from src.models.proposed_networks import NetworkFactory
 from src.losses.losses import LossFactory
 from src.metrics.metrics import MetricFactory
@@ -382,7 +382,7 @@ class CoronaryArterySegmentModel(pytorch_lightning.LightningModule):
     "--experiment",
     type=int,
     default=1,
-    help="Distance map processing experiment ID (1-7).",
+    help="Distance map processing experiment ID (1-8).",
 )
 def main(
     arch_name,
@@ -404,7 +404,7 @@ def main(
     print_monai_config()
 
     # set up loggers and checkpoints
-    log_dir = f"result/ab1_{arch_name}" + f"_exp{experiment}"
+    log_dir = f"result/ab1_2_{arch_name}" + f"_exp{experiment}"
     os.makedirs(log_dir, exist_ok=True)
 
     # GPU Setting
