@@ -27,7 +27,7 @@ from monai.inferers import sliding_window_inference
 
 from src.models.proposed.spade import SPADE
 
-__all__ = ["SegResNet", "SegResNetVAE", "SPADESegResNet", "PPESegResNet"]
+__all__ = ["SegResNet", "SegResNetVAE", "SPADESegResNet", "EncoderSPADESegResNet", "PPESegResNet"]
 
 
 class SegResNet(nn.Module):
@@ -36,6 +36,8 @@ class SegResNet(nn.Module):
     <https://arxiv.org/pdf/1810.11654.pdf>`_.
     The module does not include the variational autoencoder (VAE).
     The model supports 2D or 3D inputs.
+    SegResNet variant with SPADE normalization only in the decoder path.
+    Encoder uses standard ResBlocks without SPADE.
 
     Args:
         spatial_dims: spatial dimension of the input data. Defaults to 3.
@@ -57,6 +59,7 @@ class SegResNet(nn.Module):
             - ``deconv``, uses transposed convolution layers.
             - ``nontrainable``, uses non-trainable `linear` interpolation.
             - ``pixelshuffle``, uses :py:class:`monai.networks.blocks.SubpixelUpsample`.
+        label_nc: number of channels in the segmentation map. Defaults to 1.
 
     """
 
@@ -82,6 +85,7 @@ class SegResNet(nn.Module):
         if spatial_dims not in (2, 3):
             raise ValueError("`spatial_dims` can only be 2 or 3.")
 
+        # Initialize parameters
         self.spatial_dims = spatial_dims
         self.init_filters = init_filters
         self.in_channels = in_channels
@@ -97,6 +101,8 @@ class SegResNet(nn.Module):
         self.norm = norm
         self.upsample_mode = UpsampleMode(upsample_mode)
         self.use_conv_final = use_conv_final
+
+        # Initialize layers
         self.convInit = get_conv_layer(spatial_dims, in_channels, init_filters)
         self.down_layers = self._make_down_layers()
         self.up_layers, self.up_samples = self._make_up_layers(label_nc)
@@ -159,6 +165,7 @@ class SegResNet(nn.Module):
         )
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Encoder without SPADE normalization"""
         x = self.convInit(x)
         if self.dropout_prob is not None:
             x = self.dropout(x)
@@ -172,6 +179,7 @@ class SegResNet(nn.Module):
         return x, down_x
 
     def decode(self, x: torch.Tensor, down_x: list[torch.Tensor], segmap: torch.Tensor) -> torch.Tensor:
+        """Decoder with SPADE normalization"""
         for i, (up, upl) in enumerate(zip(self.up_samples, self.up_layers)):
             x = up(x) + down_x[i + 1]
             x = upl(x, segmap)  # Pass segmap to the custom module
@@ -389,9 +397,10 @@ class SPADESegResNet(nn.Module):
         blocks_down: tuple = (1, 2, 2, 4),
         blocks_up: tuple = (1, 1, 1),
         upsample_mode: UpsampleMode | str = UpsampleMode.NONTRAINABLE,
-        label_nc: int = 1,
+        label_nc: int = 1, # New parameter for segmap channels
     ):
         super().__init__()
+
         # Initialize parameters
         self.spatial_dims = spatial_dims
         self.init_filters = init_filters
@@ -414,11 +423,12 @@ class SPADESegResNet(nn.Module):
         self.down_layers = self._make_down_layers(label_nc)
         self.up_layers, self.up_samples = self._make_up_layers(label_nc)
         self.conv_final = self._make_final_conv(out_channels)
+        self.spa_de = SPADE(init_filters, label_nc=label_nc)  # Initialize SPADE with initial filters
 
         if dropout_prob is not None:
             self.dropout = Dropout[Dropout.DROPOUT, spatial_dims](dropout_prob)
 
-    def _make_down_layers(self, label_nc):
+    def _make_down_layers(self, label_nc: int):
         down_layers = nn.ModuleList()
         for i, item in enumerate(self.blocks_down):
             layer_in_channels = self.init_filters * 2**i
@@ -475,11 +485,13 @@ class SPADESegResNet(nn.Module):
         )
 
     def encode(self, x: torch.Tensor, segmap: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Encoder with SPADE normalization"""
         x = self.convInit(x)
         if self.dropout_prob is not None:
             x = self.dropout(x)
 
         down_x = []
+
         for down in self.down_layers:
             if isinstance(down[-1], SPADEDownBlock):
                 x = down[0](x)  # Apply pre_conv
@@ -491,6 +503,7 @@ class SPADESegResNet(nn.Module):
         return x, down_x
 
     def decode(self, x: torch.Tensor, down_x: list[torch.Tensor], segmap: torch.Tensor) -> torch.Tensor:
+        """Decoder with SPADE normalization"""
         for i, (up, upl) in enumerate(zip(self.up_samples, self.up_layers)):
             x = up(x) + down_x[i + 1]
             x = upl(x, segmap)
@@ -502,8 +515,161 @@ class SPADESegResNet(nn.Module):
     def forward(self, x: torch.Tensor, segmap: torch.Tensor) -> torch.Tensor:
         x, down_x = self.encode(x, segmap)
         down_x.reverse()
+
         x = self.decode(x, down_x, segmap)
         return x
+
+
+class EncoderSPADESegResNet(nn.Module):
+    """
+    SegResNet variant with SPADE normalization only in the encoder path.
+    Decoder uses standard ResBlocks without SPADE.
+    """
+    def __init__(
+        self,
+        spatial_dims: int = 3,
+        init_filters: int = 8,
+        in_channels: int = 1,
+        out_channels: int = 2,
+        dropout_prob: float | None = None,
+        act: tuple | str = ("RELU", {"inplace": True}),
+        norm: tuple | str = ("GROUP", {"num_groups": 8}),
+        norm_name: str = "",
+        num_groups: int = 8,
+        use_conv_final: bool = True,
+        blocks_down: tuple = (1, 2, 2, 4),
+        blocks_up: tuple = (1, 1, 1),
+        upsample_mode: UpsampleMode | str = UpsampleMode.NONTRAINABLE,
+        label_nc: int = 1,  # New parameter for segmap channels
+    ):
+        super().__init__()
+
+        # Initialize parameters
+        self.spatial_dims = spatial_dims
+        self.init_filters = init_filters
+        self.in_channels = in_channels
+        self.blocks_down = blocks_down
+        self.blocks_up = blocks_up
+        self.dropout_prob = dropout_prob
+        self.act = act
+        self.act_mod = get_act_layer(act)
+        if norm_name:
+            if norm_name.lower() != "group":
+                raise ValueError(f"Deprecating option 'norm_name={norm_name}', please use 'norm' instead.")
+            norm = ("group", {"num_groups": num_groups})
+        self.norm = norm
+        self.upsample_mode = UpsampleMode(upsample_mode)
+        self.use_conv_final = use_conv_final
+        
+        # Initialize layers
+        self.convInit = get_conv_layer(spatial_dims, in_channels, init_filters)
+        self.down_layers = self._make_down_layers(label_nc)  # SPADE in encoder
+        self.up_layers, self.up_samples = self._make_up_layers()  # No SPADE in decoder
+        self.conv_final = self._make_final_conv(out_channels)
+        self.spa_de = SPADE(init_filters, label_nc=label_nc)  # Initialize SPADE with initial filters
+
+        if dropout_prob is not None:
+            self.dropout = Dropout[Dropout.DROPOUT, spatial_dims](dropout_prob)
+
+    def _make_down_layers(self, label_nc: int):
+        """Create encoder layers with SPADE normalization"""
+        down_layers = nn.ModuleList()
+        for i, item in enumerate(self.blocks_down):
+            layer_in_channels = self.init_filters * 2**i
+            pre_conv = (
+                get_conv_layer(self.spatial_dims, layer_in_channels // 2, layer_in_channels, stride=2)
+                if i > 0
+                else nn.Identity()
+            )
+            
+            # Create ResBlocks sequence
+            blocks = nn.Sequential(*[
+                ResBlock(self.spatial_dims, layer_in_channels, norm=self.norm, act=self.act) 
+                for _ in range(item)
+            ])
+            
+            # Create SPADE layer
+            spade_layer = SPADE(layer_in_channels, label_nc)
+            
+            # Combine into SPADEDownBlock
+            down_layer = nn.Sequential(
+                pre_conv,
+                SPADEDownBlock(blocks, spade_layer)
+            )
+            down_layers.append(down_layer)
+        return down_layers
+
+    def _make_up_layers(self):
+        """Create decoder layers with standard ResBlocks (no SPADE)"""
+        up_layers, up_samples = nn.ModuleList(), nn.ModuleList()
+        upsample_mode, blocks_up, spatial_dims, filters, norm = (
+            self.upsample_mode,
+            self.blocks_up,
+            self.spatial_dims,
+            self.init_filters,
+            self.norm,
+        )
+        n_up = len(blocks_up)
+        for i in range(n_up):
+            sample_in_channels = filters * 2 ** (n_up - i)
+            
+            # Standard ResBlocks without SPADE
+            up_layer = nn.Sequential(*[
+                ResBlock(spatial_dims, sample_in_channels // 2, norm=norm, act=self.act)
+                for _ in range(blocks_up[i])
+            ])
+            
+            up_layers.append(up_layer)
+            up_samples.append(
+                nn.Sequential(
+                    get_conv_layer(spatial_dims, sample_in_channels, sample_in_channels // 2, kernel_size=1),
+                    get_upsample_layer(spatial_dims, sample_in_channels // 2, upsample_mode=upsample_mode),
+                )
+            )
+        return up_layers, up_samples
+
+    def _make_final_conv(self, out_channels: int):
+        return nn.Sequential(
+            get_norm_layer(name=self.norm, spatial_dims=self.spatial_dims, channels=self.init_filters),
+            self.act_mod,
+            get_conv_layer(self.spatial_dims, self.init_filters, out_channels, kernel_size=1, bias=True),
+        )
+
+    def encode(self, x: torch.Tensor, segmap: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Encoder with SPADE normalization"""
+        x = self.convInit(x)
+        if self.dropout_prob is not None:
+            x = self.dropout(x)
+
+        down_x = []
+
+        for down in self.down_layers:
+            if isinstance(down[-1], SPADEDownBlock):
+                x = down[0](x)  # Apply pre_conv
+                x = down[-1](x, segmap)  # Apply SPADEDownBlock with segmap
+            else:
+                x = down(x)
+            down_x.append(x)
+
+        return x, down_x
+
+    def decode(self, x: torch.Tensor, down_x: list[torch.Tensor]) -> torch.Tensor:
+        """Decoder with standard ResBlocks (no SPADE)"""
+        for i, (up, upl) in enumerate(zip(self.up_samples, self.up_layers)):
+            x = up(x) + down_x[i + 1]
+            x = upl(x)  # Standard ResBlock without segmap
+
+        if self.use_conv_final:
+            x = self.conv_final(x)
+        return x
+
+    def forward(self, x: torch.Tensor, segmap: torch.Tensor) -> torch.Tensor:
+        x, down_x = self.encode(x, segmap)  # Encoder uses segmap
+        down_x.reverse()
+
+        x = self.decode(x, down_x)  # Decoder doesn't use segmap
+        return x
+
 
 
 class PPEModule(nn.Module):
