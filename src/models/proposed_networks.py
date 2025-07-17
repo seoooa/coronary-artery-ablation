@@ -1,6 +1,6 @@
 import autorootcwd
 import torch
-from .proposed.segresnet import SegResNet, PPESegResNet
+from .proposed.segresnet import SegResNet, PPESegResNet, SPADESegResNet, EncoderSPADESegResNet
 from .proposed.unetr import UNETR
 from .proposed.swin_unetr import SwinUNETRv2
 from .proposed.nnformer import nnFormer
@@ -13,6 +13,30 @@ class NetworkFactory:
     def create_network(arch_name, patch_size=(96, 96, 96), label_nc=8):
         if arch_name == "SegResNet":
             return SegResNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+                init_filters=16,
+                blocks_down=(1, 2, 2, 4),
+                blocks_up=(1, 1, 1),
+                dropout_prob=0.2,
+                label_nc=label_nc,
+            )
+        
+        elif arch_name == "SPADESegResNet":
+            return SPADESegResNet(
+                spatial_dims=3,
+                in_channels=1,
+                out_channels=2,
+                init_filters=16,
+                blocks_down=(1, 2, 2, 4),
+                blocks_up=(1, 1, 1),
+                dropout_prob=0.2,
+                label_nc=label_nc,
+            ) 
+    
+        elif arch_name == "EncoderSPADESegResNet":
+            return EncoderSPADESegResNet(
                 spatial_dims=3,
                 in_channels=1,
                 out_channels=2,

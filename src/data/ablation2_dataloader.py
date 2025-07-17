@@ -20,93 +20,21 @@ import SimpleITK as sitk
 import torch
 import lightning.pytorch as pl
 from pathlib import Path
-import functools
 
-# 7 experiments
-EXPERIMENT_CONFIGS = {
-    1: {
-        "name": "no distance map",
-        "clip_min": 0.0,
-        "clip_max": 0.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    2: {
-        "name": "Clipping -20~20",
-        "clip_min": -20.0,
-        "clip_max": 20.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    3: {
-        "name": "Clipping -50~50",
-        "clip_min": -50.0,
-        "clip_max": 50.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    4: {
-        "name": "Clipping -100~100",
-        "clip_min": -100.0,
-        "clip_max": 100.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    5: {
-        "name": "Clipping -150~150",
-        "clip_min": -150.0,
-        "clip_max": 150.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    6: {
-        "name": "Clipping min~max",
-        "clip_min": None,
-        "clip_max": None,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    7: {
-        "name": "Negative Clipping (min~0)",
-        "clip_min": None,
-        "clip_max": 0.0,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-    8: {
-        "name": "Positive Clipping (0~max)",
-        "clip_min": 0.0,
-        "clip_max": None,
-        "normalize": False,
-        "norm_min": None,
-        "norm_max": None,
-    },
-}
-
-
-def clip_normalize_distance_map(data, clip_min=None, clip_max=None, normalize=False, norm_min=-1, norm_max=1):
+def create_distance_map(binary_mask):
     """
-    clip and normalize distance map
+    create distance map from binary mask
+    
+    Args:
+        binary_mask (torch.Tensor): [C, H, W, D] binary mask
+        
+    Returns:
+        torch.Tensor: [C, H, W, D] distance map
     """
-    dist = data["seg"]  # [8, H, W, D]
-    
-    # Skip distance map generation if both clip_min and clip_max are 0.0
-    if clip_min == 0.0 and clip_max == 0.0:
-        return data
-    
-    # clipping and normalization
     distance_maps = []
     
-    for c in range(dist.shape[0]):  # each channel
-
-        channel_mask = dist[c].numpy()  # [H, W, D]
+    for c in range(binary_mask.shape[0]):  # each channel
+        channel_mask = binary_mask[c].numpy()  # [H, W, D]
         
         # convert to SimpleITK image
         sitk_mask = sitk.GetImageFromArray(channel_mask)
@@ -124,56 +52,27 @@ def clip_normalize_distance_map(data, clip_min=None, clip_max=None, normalize=Fa
         distance_map_array = sitk.GetArrayFromImage(distance_map)
         distance_map_tensor = torch.from_numpy(distance_map_array)
         
-        # clipping if clip_min and clip_max are provided
-        if clip_min is not None and clip_max is not None:
-            clipped_dist = torch.clamp(distance_map_tensor, min=clip_min, max=clip_max)
-        elif clip_min is not None:
-            clipped_dist = torch.clamp(distance_map_tensor, min=clip_min)
-        elif clip_max is not None:
-            clipped_dist = torch.clamp(distance_map_tensor, max=clip_max)
-        else:
-            clipped_dist = distance_map_tensor
+        # clip values between -60 and 60
+        clip_value = 60.0
+        distance_map_tensor = torch.clamp(distance_map_tensor, min=-clip_value, max=clip_value)
         
-        # normalize if normalize=True
-        if normalize:
-            if clip_min is not None and clip_max is not None:
-                # use clipping range for normalization
-                processed_dist = (clipped_dist - clip_min) / (clip_max - clip_min)
-                processed_dist = processed_dist * (norm_max - norm_min) + norm_min
-            else:
-                # use actual data range for normalization
-                data_min = clipped_dist.min()
-                data_max = clipped_dist.max()
-                processed_dist = (clipped_dist - data_min) / (data_max - data_min)
-                processed_dist = processed_dist * (norm_max - norm_min) + norm_min
-        else:
-            processed_dist = clipped_dist
+        # normalize to [-1, 1] range
+        distance_map_tensor = distance_map_tensor / clip_value
         
-        distance_maps.append(processed_dist)
+        distance_maps.append(distance_map_tensor)
     
-    processed_dist = torch.stack(distance_maps)
+    return torch.stack(distance_maps)
 
+def ConvertDistanceMap(data):
+    """
+    convert segmentation to distance map
+    """
+    seg = data["seg"]  # [C, H, W, D] one-hot encoded segmentation
     
-    data["seg"] = processed_dist
+    distance_map = create_distance_map(seg)
+    
+    data["seg"] = distance_map
     return data
-
-def clip_normalize_distance_map_with_config(data, experiment_id):
-    """
-    clip and normalize distance map with experiment config
-    """
-    if experiment_id not in EXPERIMENT_CONFIGS:
-        raise ValueError(f"Invalid experiment_id: {experiment_id}. Must be 1-7.")
-    
-    exp_config = EXPERIMENT_CONFIGS[experiment_id]
-    
-    return clip_normalize_distance_map(
-        data,
-        clip_min=exp_config["clip_min"],
-        clip_max=exp_config["clip_max"],
-        normalize=exp_config["normalize"],
-        norm_min=exp_config["norm_min"],
-        norm_max=exp_config["norm_max"]
-    )
 
 class CoronaryArteryDataModule(pl.LightningDataModule):
     def __init__(
@@ -183,7 +82,7 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         patch_size: tuple = (96, 96, 96),
         num_workers: int = 4, 
         cache_rate: float = 0.05,
-        experiment_id: int = 1
+        loc: str = "decoder"
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -191,32 +90,10 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         self.patch_size = patch_size
         self.num_workers = num_workers
         self.cache_rate = cache_rate
-        self.experiment_id = experiment_id
+        self.loc = loc
         self.train_ds = None
         self.val_ds = None
         self.test_ds = None
-        
-        # setting experiment
-        if experiment_id not in EXPERIMENT_CONFIGS:
-            raise ValueError(f"Invalid experiment_id: {experiment_id}. Must be 1-7.")
-        
-        self.exp_config = EXPERIMENT_CONFIGS[experiment_id]
-        
-    def get_distance_map_processor(self):
-        """Create a picklable function for distance map processing"""
-        exp_config = self.exp_config
-        
-        def process_distance_map(data):
-            return clip_normalize_distance_map(
-                data,
-                clip_min=exp_config["clip_min"],
-                clip_max=exp_config["clip_max"],
-                normalize=exp_config["normalize"],
-                norm_min=exp_config["norm_min"],
-                norm_max=exp_config["norm_max"]
-            )
-        
-        return process_distance_map
         
     def load_data_splits(self, split: str):
         split_dir = self.data_dir / split
@@ -240,12 +117,6 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         return data_files
 
     def prepare_data(self):
-        # Use functools.partial to create a picklable function
-        distance_map_processor = functools.partial(
-            clip_normalize_distance_map_with_config,
-            experiment_id=self.experiment_id
-        )
-        
         transforms = [
             LoadImaged(keys=["image", "label", "seg"]),
             EnsureChannelFirstd(keys=["image", "label", "seg"]),
@@ -263,7 +134,7 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
                 to_onehot=8,
             ),
             CropForegroundd(keys=["image", "label", "seg"], source_key="image"),
-            Lambda(distance_map_processor),
+            Lambda(ConvertDistanceMap),
             RandCropByPosNegLabeld(
                 keys=["image", "label", "seg"],
                 label_key="label",
@@ -306,7 +177,7 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
                 to_onehot=8,
             ),
             CropForegroundd(keys=["image", "label", "seg"], source_key="image"),
-            Lambda(distance_map_processor)
+            Lambda(ConvertDistanceMap),
         ]
 
         self.val_transforms = Compose(val_transforms)
@@ -321,8 +192,8 @@ class CoronaryArteryDataModule(pl.LightningDataModule):
         print(f"Found {len(test_files)} test cases")
 
         # debug transforms
-        print(f"Ablation 1: Experiment {self.experiment_id}: {self.exp_config['name']}")
-        
+        print(f"Ablation 2: Injecting feature modulation block in {self.loc}")
+
         self.train_ds = CacheDataset(
             data=train_files,
             transform=self.train_transforms,
