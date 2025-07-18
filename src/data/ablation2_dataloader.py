@@ -53,11 +53,11 @@ def create_distance_map(binary_mask):
         distance_map_tensor = torch.from_numpy(distance_map_array)
         
         # clip values between -60 and 60
-        clip_value = 60.0
-        distance_map_tensor = torch.clamp(distance_map_tensor, min=-clip_value, max=clip_value)
+        # clip_value = 60.0
+        # distance_map_tensor = torch.clamp(distance_map_tensor, min=-clip_value, max=clip_value)
         
         # normalize to [-1, 1] range
-        distance_map_tensor = distance_map_tensor / clip_value
+        # distance_map_tensor = distance_map_tensor / clip_value
         
         distance_maps.append(distance_map_tensor)
     
